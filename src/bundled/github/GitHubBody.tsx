@@ -5,6 +5,7 @@ import {
   isValidElement,
   memo,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -191,8 +192,8 @@ function EmbeddedAttachment({
   children(src: string): ReactNode;
   fallback: ReactNode;
   caption: ReactNode;
-  /** A signed link loaded, or failed. */
-  onMedia?: ((loaded: boolean) => void) | undefined;
+  /** The signed link `src` loaded, or failed. */
+  onMedia?: ((loaded: boolean, src: string) => void) | undefined;
 }) {
   const [loaded, setLoaded] = useState(false);
   // Media loads its own link first. When that fails it takes the signed link,
@@ -207,7 +208,7 @@ function EmbeddedAttachment({
   const show = (next: boolean) => {
     setLoaded(next);
     setFailed(!next);
-    if (shown !== source) onMedia?.(next);
+    if (shown !== source) onMedia?.(next, shown);
   };
   return (
     <div
@@ -260,10 +261,15 @@ const components: Components = {
   ),
 };
 
+const RETRY_DELAY = 30_000;
+const MAX_RETRIES = 3;
+
 /** A private repository's media links need a GitHub sign-in; `bodyHtml` has
  * signed links for them that expire within minutes and change on every read.
  * Media whose own link fails takes its signed link, and when that fails reads
- * GitHub again with `refresh` and takes the link read. */
+ * GitHub again with `refresh` and takes the link read. When a read leaves
+ * media failed with no newer link to try, it reads again after 30 seconds, at
+ * most three times until a signed link loads. */
 export const GitHubBody = memo(function GitHubBody({
   body,
   bodyHtml,
@@ -283,22 +289,76 @@ export const GitHubBody = memo(function GitHubBody({
     () => (bounded ? attachmentMetadata(bodyHtml) : new Map()),
     [bounded, bodyHtml],
   );
-  // One read at a time; media that failed since it last loaded does not
-  // read again.
-  const failed = useRef(new Set<string>());
+  // One read at a time. Media whose signed link failed since it last loaded
+  // (kept with that link) does not read again at once; it waits for a retry.
+  const failed = useRef(new Map<string, string>());
   const reading = useRef(false);
+  const retry = useRef<{
+    timer?: ReturnType<typeof setTimeout> | undefined;
+    count: number;
+    stopped?: boolean;
+  }>({ count: 0 });
+  // A retry reads with the latest body's links and refresh.
+  const latest = useRef({ metadata, refresh });
+  useEffect(() => {
+    latest.current = { metadata, refresh };
+  }, [metadata, refresh]);
+  useEffect(() => {
+    const state = retry.current;
+    state.stopped = false;
+    return () => {
+      state.stopped = true;
+      clearTimeout(state.timer);
+      state.timer = undefined;
+    };
+  }, []);
   if (!bounded) return <div className={styles.plainBody}>{body}</div>;
 
-  const renew = (source: string, loaded: boolean) => {
-    if (loaded) failed.current.delete(source);
-    if (loaded || !refresh || failed.current.has(source)) return;
-    failed.current.add(source);
-    if (reading.current) return;
+  // Failed media whose latest signed link is the one that failed.
+  const stuck = () =>
+    [...failed.current].some(
+      ([source, link]) => signedUrl(source, latest.current.metadata) === link,
+    );
+  const read = () => {
+    const current = latest.current.refresh;
+    if (!current) return;
     reading.current = true;
     const done = () => {
       reading.current = false;
+      later();
     };
-    refresh().then(done, done);
+    current().then(done, done);
+  };
+  const later = () => {
+    const state = retry.current;
+    if (
+      state.stopped ||
+      state.timer ||
+      reading.current ||
+      state.count >= MAX_RETRIES ||
+      !stuck()
+    )
+      return;
+    state.timer = setTimeout(() => {
+      state.timer = undefined;
+      // A read in flight retries when it settles; links read meanwhile are
+      // tried first.
+      if (reading.current || !stuck()) return;
+      state.count += 1;
+      read();
+    }, RETRY_DELAY);
+  };
+  const renew = (source: string, loaded: boolean, link: string) => {
+    if (!refresh) return;
+    if (loaded) {
+      failed.current.delete(source);
+      retry.current.count = 0;
+      return;
+    }
+    const known = failed.current.has(source);
+    failed.current.set(source, link);
+    if (known || reading.current) later();
+    else read();
   };
 
   const media: Media = (source, label, image = false, description) => {
@@ -316,7 +376,8 @@ export const GitHubBody = memo(function GitHubBody({
         source={source}
         {...(signed && {
           signed,
-          onMedia: (loaded: boolean) => renew(source, loaded),
+          onMedia: (loaded: boolean, link: string) =>
+            renew(source, loaded, link),
         })}
         fallback={link}
         caption={

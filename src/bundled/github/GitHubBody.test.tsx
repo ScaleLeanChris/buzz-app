@@ -31,6 +31,7 @@ const metadata = `<details><summary>before.mp4</summary><video src="${signedBefo
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -271,7 +272,7 @@ it("takes a signed link only when media's own link fails, renewing it when that 
   expect(container.querySelector("video")).toBe(video);
   expect(video).toHaveAttribute("src", before);
   await act(async () => read.resolve());
-  // A renewed link that fails before loading does not read again.
+  // A renewed link that fails before loading does not read again at once.
   fireEvent.error(screen.getByAltText("Screenshot"));
   expect(refresh).toHaveBeenCalledOnce();
 });
@@ -310,6 +311,186 @@ it("reads again after a failed renewal, one read at a time", async () => {
   // reads again.
   fireEvent.error(later);
   expect(refresh).toHaveBeenCalledTimes(2);
+});
+
+const privateImage = (jwt: string) =>
+  `<img src="${signedImage(jwt)}" alt="Screenshot">`;
+const privateBody = `![Screenshot](${image})`;
+const settle = () => act(async () => {});
+const wait = (ms: number) =>
+  act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+// Its own link fails, then its signed link: one read.
+const failTwice = () => {
+  fireEvent.error(screen.getByAltText("Screenshot"));
+  fireEvent.error(screen.getByAltText("Screenshot"));
+};
+
+it("reads again 30 seconds after a failed renewal, three times at most", async () => {
+  vi.useFakeTimers();
+  const refresh = vi.fn(() => Promise.reject(new Error("Not Found")));
+  render(
+    <GitHubBody
+      url={url}
+      body={privateBody}
+      bodyHtml={privateImage("1")}
+      refresh={refresh}
+    />,
+  );
+  failTwice();
+  expect(refresh).toHaveBeenCalledOnce();
+  await settle();
+  await wait(29_999);
+  expect(refresh).toHaveBeenCalledOnce();
+  await wait(1);
+  expect(refresh).toHaveBeenCalledTimes(2);
+  await wait(30_000);
+  await wait(30_000);
+  expect(refresh).toHaveBeenCalledTimes(4);
+  // Then it stops, leaving the original link.
+  await wait(5 * 60_000);
+  expect(refresh).toHaveBeenCalledTimes(4);
+  expect(vi.getTimerCount()).toBe(0);
+  expect(screen.getByRole("link", { name: "Screenshot" })).toHaveAttribute(
+    "href",
+    image,
+  );
+});
+
+it("stops retrying once a renewed link loads, and retries afresh after", async () => {
+  vi.useFakeTimers();
+  let reads = 0;
+  const refresh = vi.fn(async () => {
+    reads += 1;
+    if (reads !== 2) throw new Error("Not Found");
+    view.rerender(
+      <GitHubBody
+        url={url}
+        body={privateBody}
+        bodyHtml={privateImage("2")}
+        refresh={refresh}
+      />,
+    );
+  });
+  const view = render(
+    <GitHubBody
+      url={url}
+      body={privateBody}
+      bodyHtml={privateImage("1")}
+      refresh={refresh}
+    />,
+  );
+  failTwice();
+  await settle();
+  await wait(30_000);
+  expect(refresh).toHaveBeenCalledTimes(2);
+  expect(screen.getByAltText("Screenshot")).toHaveAttribute(
+    "src",
+    signedImage("2"),
+  );
+  fireEvent.load(screen.getByAltText("Screenshot"));
+  await wait(5 * 60_000);
+  expect(refresh).toHaveBeenCalledTimes(2);
+  // When it expires later it reads at once, then has three retries again.
+  fireEvent.error(screen.getByAltText("Screenshot"));
+  expect(refresh).toHaveBeenCalledTimes(3);
+  await settle();
+  await wait(5 * 60_000);
+  expect(refresh).toHaveBeenCalledTimes(6);
+});
+
+it("cancels a pending retry on unmount, and schedules none after it", async () => {
+  vi.useFakeTimers();
+  const refresh = vi.fn(() => Promise.reject(new Error("Not Found")));
+  const first = render(
+    <GitHubBody
+      url={url}
+      body={privateBody}
+      bodyHtml={privateImage("1")}
+      refresh={refresh}
+    />,
+  );
+  failTwice();
+  await settle();
+  expect(vi.getTimerCount()).toBe(1);
+  first.unmount();
+  expect(vi.getTimerCount()).toBe(0);
+  await wait(60_000);
+  expect(refresh).toHaveBeenCalledOnce();
+
+  const read = deferred<void>();
+  const pending = vi.fn(() => read.promise);
+  const second = render(
+    <GitHubBody
+      url={url}
+      body={privateBody}
+      bodyHtml={privateImage("1")}
+      refresh={pending}
+    />,
+  );
+  failTwice();
+  second.unmount();
+  await act(async () => read.reject(new Error("Not Found")));
+  expect(vi.getTimerCount()).toBe(0);
+  await wait(60_000);
+  expect(pending).toHaveBeenCalledOnce();
+});
+
+it("never schedules a retry for public media or media whose own link loads", async () => {
+  vi.useFakeTimers();
+  const refresh = vi.fn(() => Promise.reject(new Error("Not Found")));
+  render(
+    <GitHubBody
+      url={url}
+      body={`![Asset](${image})\n\n![Screenshot](${after})`}
+      bodyHtml={`<img src="${image}" alt="Asset"><img src="https://private-user-images.githubusercontent.com/1888043/2-dd1f7e4f-e2a4-4aec-b661-cb45032f29c5.png?jwt=1" alt="Screenshot">`}
+      refresh={refresh}
+    />,
+  );
+  fireEvent.error(screen.getByAltText("Asset"));
+  fireEvent.load(screen.getByAltText("Screenshot"));
+  expect(screen.getByAltText("Screenshot")).toHaveAttribute("src", after);
+  await settle();
+  expect(vi.getTimerCount()).toBe(0);
+  await wait(5 * 60_000);
+  expect(refresh).not.toHaveBeenCalled();
+});
+
+it("tries a link a poll delivers before the retry instead of reading again", async () => {
+  vi.useFakeTimers();
+  const refresh = vi.fn(() => Promise.reject(new Error("Not Found")));
+  const { rerender } = render(
+    <GitHubBody
+      url={url}
+      body={privateBody}
+      bodyHtml={privateImage("1")}
+      refresh={refresh}
+    />,
+  );
+  failTwice();
+  await settle();
+  await wait(10_000);
+  // A PR poll brings a newer link; the failed image takes it.
+  rerender(
+    <GitHubBody
+      url={url}
+      body={privateBody}
+      bodyHtml={privateImage("2")}
+      refresh={refresh}
+    />,
+  );
+  expect(screen.getByAltText("Screenshot")).toHaveAttribute(
+    "src",
+    signedImage("2"),
+  );
+  // Still loading when the retry is due: nothing is read.
+  await wait(20_000);
+  expect(refresh).toHaveBeenCalledOnce();
+  fireEvent.load(screen.getByAltText("Screenshot"));
+  await wait(5 * 60_000);
+  expect(refresh).toHaveBeenCalledOnce();
+  expect(vi.getTimerCount()).toBe(0);
 });
 
 it("keeps public and raw media on their own links without reading again", () => {
