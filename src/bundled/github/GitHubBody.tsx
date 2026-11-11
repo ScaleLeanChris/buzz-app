@@ -215,7 +215,15 @@ function EmbeddedAttachment({
       className={styles.attachment}
       onLoadCapture={() => show(true)}
       onLoadedDataCapture={() => show(true)}
-      onErrorCapture={() => show(false)}
+      onErrorCapture={(event) => {
+        // Players reload a network failure quietly. An expired or missing
+        // link fails as unsupported (code 4) in Chromium and WebKit, so only
+        // that takes another link.
+        const target = event.target;
+        if (target instanceof HTMLMediaElement && target.error?.code === 2)
+          return;
+        show(false);
+      }}
     >
       {/* Media keeps a failure until remounted with a new source. */}
       <Fragment key={shown}>{children(shown)}</Fragment>

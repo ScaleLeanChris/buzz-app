@@ -535,6 +535,41 @@ it("never schedules a retry for public media or media whose own link loads", asy
   expect(refresh).not.toHaveBeenCalled();
 });
 
+it("leaves network failures on a signed video to the player's quiet reload", async () => {
+  vi.useFakeTimers();
+  const refresh = vi.fn(async () => {});
+  const view = render(
+    <GitHubBody
+      url={url}
+      body={before}
+      bodyHtml={`<video src="${signedVideo("1")}"></video>`}
+      refresh={refresh}
+    />,
+  );
+  const video = () => view.container.querySelector("video") as HTMLVideoElement;
+  const fail = (code: number) => {
+    const shown = video();
+    Object.defineProperty(shown, "error", {
+      configurable: true,
+      value: { code },
+    });
+    fireEvent.error(shown);
+  };
+  fail(4);
+  const signed = video();
+  expect(signed).toHaveAttribute("src", signedVideo("1"));
+  fireEvent.loadedData(signed);
+  // A network blip neither reads again nor remounts the player.
+  fail(2);
+  await settle();
+  expect(video()).toBe(signed);
+  expect(refresh).not.toHaveBeenCalled();
+  // When the player's own reloads give up, the panel still reads nothing.
+  await wait(5 * 60_000);
+  expect(refresh).not.toHaveBeenCalled();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
 it("tries a link a poll delivers before the retry instead of reading again", async () => {
   vi.useFakeTimers();
   const refresh = vi.fn(() => Promise.reject(new Error("Not Found")));
