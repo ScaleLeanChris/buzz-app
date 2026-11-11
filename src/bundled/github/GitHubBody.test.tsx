@@ -317,6 +317,13 @@ const privateImage = (jwt: string) =>
   `<img src="${signedImage(jwt)}" alt="Screenshot">`;
 const privateBody = `![Screenshot](${image})`;
 const settle = () => act(async () => {});
+const fail = (element: HTMLMediaElement, code: number) => {
+  Object.defineProperty(element, "error", {
+    configurable: true,
+    value: { code },
+  });
+  fireEvent.error(element);
+};
 const wait = (ms: number) =>
   act(async () => {
     await vi.advanceTimersByTimeAsync(ms);
@@ -541,33 +548,52 @@ it("leaves network failures on a signed video to the player's quiet reload", asy
   const view = render(
     <GitHubBody
       url={url}
-      body={before}
+      body={`[Movie](${before})`}
       bodyHtml={`<video src="${signedVideo("1")}"></video>`}
       refresh={refresh}
     />,
   );
   const video = () => view.container.querySelector("video") as HTMLVideoElement;
-  const fail = (code: number) => {
-    const shown = video();
-    Object.defineProperty(shown, "error", {
-      configurable: true,
-      value: { code },
-    });
-    fireEvent.error(shown);
-  };
-  fail(4);
+  const movie = () => screen.queryByRole("link", { name: "Movie" });
+  fail(video(), 4);
   const signed = video();
   expect(signed).toHaveAttribute("src", signedVideo("1"));
   fireEvent.loadedData(signed);
-  // A network blip neither reads again nor remounts the player.
-  fail(2);
+  expect(movie()).not.toBeInTheDocument();
+  // A network blip neither reads again nor remounts the player, and shows
+  // the original link until the video loads again.
+  fail(signed, 2);
   await settle();
   expect(video()).toBe(signed);
-  expect(refresh).not.toHaveBeenCalled();
-  // When the player's own reloads give up, the panel still reads nothing.
+  expect(movie()).toHaveAttribute("href", before);
+  fireEvent.loadedMetadata(signed);
+  expect(movie()).not.toBeInTheDocument();
+  // When the player's own reloads give up, the original link stays and the
+  // panel still reads nothing.
+  fail(signed, 2);
   await wait(5 * 60_000);
+  expect(screen.getByText("Video unavailable")).toBeVisible();
+  expect(movie()).toHaveAttribute("href", before);
   expect(refresh).not.toHaveBeenCalled();
   expect(vi.getTimerCount()).toBe(0);
+});
+
+it("shows the original link when loaded audio fails on a network error", () => {
+  const { container } = render(
+    <GitHubBody url={url} body={`[Audio recording](${audio})`} />,
+  );
+  const element = container.querySelector("audio");
+  if (!element) throw new Error("Missing audio");
+  fireEvent.loadedData(element);
+  expect(
+    screen.queryByRole("link", { name: "Audio recording" }),
+  ).not.toBeInTheDocument();
+  fail(element, 2);
+  expect(screen.getByText("Audio unavailable")).toBeVisible();
+  expect(screen.getByRole("link", { name: "Audio recording" })).toHaveAttribute(
+    "href",
+    audio,
+  );
 });
 
 it("tries a link a poll delivers before the retry instead of reading again", async () => {

@@ -215,13 +215,18 @@ function EmbeddedAttachment({
       className={styles.attachment}
       onLoadCapture={() => show(true)}
       onLoadedDataCapture={() => show(true)}
+      // A video player reloads after a network failure (code 2) on its own,
+      // so that keeps its link and only shows the original link until the
+      // video loads again. An expired or missing link fails as unsupported
+      // (code 4) in Chromium and WebKit, and takes another link. Audio has no
+      // quiet reload, so any audio failure does.
+      onLoadedMetadataCapture={() => setLoaded(true)}
       onErrorCapture={(event) => {
-        // Players reload a network failure quietly. An expired or missing
-        // link fails as unsupported (code 4) in Chromium and WebKit, so only
-        // that takes another link.
         const target = event.target;
-        if (target instanceof HTMLMediaElement && target.error?.code === 2)
+        if (target instanceof HTMLVideoElement && target.error?.code === 2) {
+          setLoaded(false);
           return;
+        }
         show(false);
       }}
     >
