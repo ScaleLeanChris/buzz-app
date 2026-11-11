@@ -26,6 +26,7 @@ import {
   attachmentMetadata,
   bodyUrl,
   inertHtml,
+  signedUrl,
 } from "./attachments";
 import styles from "./GitHub.module.css";
 
@@ -177,31 +178,36 @@ function githubHtml() {
 }
 
 function EmbeddedAttachment({
-  src,
+  source,
+  signed,
   children,
   fallback,
   caption,
   onMedia,
 }: {
-  src: string;
+  source: string;
+  /** The latest signed link for `source` in the rendered HTML. */
+  signed?: string | undefined;
   children(src: string): ReactNode;
   fallback: ReactNode;
   caption: ReactNode;
+  /** A signed link loaded, or failed. */
   onMedia?: ((loaded: boolean) => void) | undefined;
 }) {
   const [loaded, setLoaded] = useState(false);
-  // Signed sources change on every read: media keeps the one it shows, so it
-  // does not reload or restart, until that one fails.
-  const [shown, setShown] = useState(src);
-  const [expired, setExpired] = useState(false);
-  if (expired && src !== shown) {
-    setShown(src);
-    setExpired(false);
+  // Media loads its own link first. When that fails it takes the signed link,
+  // and when that fails the next one read; a working link stays, so media
+  // does not reload or restart when the body is read again.
+  const [shown, setShown] = useState(source);
+  const [failed, setFailed] = useState(false);
+  if (failed && signed && signed !== shown) {
+    setShown(signed);
+    setFailed(false);
   }
   const show = (next: boolean) => {
     setLoaded(next);
-    if (!next) setExpired(true);
-    onMedia?.(next);
+    setFailed(!next);
+    if (shown !== source) onMedia?.(next);
   };
   return (
     <div
@@ -254,9 +260,10 @@ const components: Components = {
   ),
 };
 
-/** Signed media links in `bodyHtml` change on every read and expire within
- * minutes. Media keeps the link it shows until that one fails; then it reads
- * GitHub again with `refresh` and shows the link read. */
+/** A private repository's media links need a GitHub sign-in; `bodyHtml` has
+ * signed links for them that expire within minutes and change on every read.
+ * Media whose own link fails takes its signed link, and when that fails reads
+ * GitHub again with `refresh` and takes the link read. */
 export const GitHubBody = memo(function GitHubBody({
   body,
   bodyHtml,
@@ -296,6 +303,7 @@ export const GitHubBody = memo(function GitHubBody({
 
   const media: Media = (source, label, image = false, description) => {
     const attachment = attachmentFor(source, metadata, image);
+    const signed = signedUrl(source, metadata);
     const link = (
       <a href={source} target="_blank" rel="noreferrer">
         {label || attachment?.name || "Open attachment"}
@@ -305,8 +313,9 @@ export const GitHubBody = memo(function GitHubBody({
     return (
       <EmbeddedAttachment
         key={source}
-        src={attachment.url}
-        {...(attachment.url !== source && {
+        source={source}
+        {...(signed && {
+          signed,
           onMedia: (loaded: boolean) => renew(source, loaded),
         })}
         fallback={link}

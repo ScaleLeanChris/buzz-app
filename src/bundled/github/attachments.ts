@@ -123,8 +123,18 @@ export function attachmentFor(
   )
     return;
   return {
-    url: descriptor?.src ?? value,
+    url: value,
     kind,
     ...(descriptor?.name ? { name: descriptor.name } : {}),
   };
+}
+
+/** `value`'s signed link in the rendered HTML, for a private repository's
+ * media whose own link needs a GitHub sign-in. */
+export function signedUrl(
+  value: string,
+  metadata: ReadonlyMap<string, Descriptor>,
+): string | undefined {
+  const url = githubMediaUrl(value);
+  return url && metadata.get(assetKey(url))?.src;
 }
