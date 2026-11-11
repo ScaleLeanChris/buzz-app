@@ -267,9 +267,10 @@ const MAX_RETRIES = 3;
 /** A private repository's media links need a GitHub sign-in; `bodyHtml` has
  * signed links for them that expire within minutes and change on every read.
  * Media whose own link fails takes its signed link, and when that fails reads
- * GitHub again with `refresh` and takes the link read. When a read leaves
- * media failed with no newer link to try, it reads again after 30 seconds, at
- * most three times until a signed link loads. */
+ * GitHub again with `refresh` and takes the link read. Each source reads at
+ * once only on its first failure; when a read leaves media failed with no
+ * newer link to try, it reads again after 30 seconds, at most three times.
+ * So a mount reads at most once per signed source plus three times. */
 export const GitHubBody = memo(function GitHubBody({
   body,
   bodyHtml,
@@ -289,9 +290,12 @@ export const GitHubBody = memo(function GitHubBody({
     () => (bounded ? attachmentMetadata(bodyHtml) : new Map()),
     [bounded, bodyHtml],
   );
-  // One read at a time. Media whose signed link failed since it last loaded
-  // (kept with that link) does not read again at once; it waits for a retry.
+  // One read at a time, and at most once per signed source plus three
+  // retries per mount: a source that already read at once (`tried`, kept
+  // through loads) waits for a retry. `failed` keeps each source's failed
+  // signed link until a signed link for it loads.
   const failed = useRef(new Map<string, string>());
+  const tried = useRef(new Set<string>());
   const reading = useRef(false);
   const retry = useRef<{
     timer?: ReturnType<typeof setTimeout> | undefined;
@@ -352,13 +356,14 @@ export const GitHubBody = memo(function GitHubBody({
     if (!refresh) return;
     if (loaded) {
       failed.current.delete(source);
-      retry.current.count = 0;
       return;
     }
-    const known = failed.current.has(source);
     failed.current.set(source, link);
-    if (known || reading.current) later();
-    else read();
+    if (tried.current.has(source) || reading.current) later();
+    else {
+      tried.current.add(source);
+      read();
+    }
   };
 
   const media: Media = (source, label, image = false, description) => {

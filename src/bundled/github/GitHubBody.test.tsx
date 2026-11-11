@@ -358,7 +358,7 @@ it("reads again 30 seconds after a failed renewal, three times at most", async (
   );
 });
 
-it("stops retrying once a renewed link loads, and retries afresh after", async () => {
+it("stops retrying once a renewed link loads, without refilling its retries", async () => {
   vi.useFakeTimers();
   let reads = 0;
   const refresh = vi.fn(async () => {
@@ -392,12 +392,90 @@ it("stops retrying once a renewed link loads, and retries afresh after", async (
   fireEvent.load(screen.getByAltText("Screenshot"));
   await wait(5 * 60_000);
   expect(refresh).toHaveBeenCalledTimes(2);
-  // When it expires later it reads at once, then has three retries again.
+  // When it expires later it already had its read at once; it waits and
+  // uses only the two retries left.
   fireEvent.error(screen.getByAltText("Screenshot"));
+  expect(refresh).toHaveBeenCalledTimes(2);
+  await wait(30_000);
   expect(refresh).toHaveBeenCalledTimes(3);
-  await settle();
   await wait(5 * 60_000);
-  expect(refresh).toHaveBeenCalledTimes(6);
+  expect(refresh).toHaveBeenCalledTimes(4);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("caps reads for media that loads and then fails on each link", async () => {
+  vi.useFakeTimers();
+  const privateVideo = (jwt: string) =>
+    `<video src="${signedVideo(jwt)}"></video>`;
+  let reads = 0;
+  // Every read brings a new link, which also loads and then fails.
+  const refresh = vi.fn(async () => {
+    reads += 1;
+    view.rerender(
+      <GitHubBody
+        url={url}
+        body={before}
+        bodyHtml={privateVideo(String(reads + 1))}
+        refresh={refresh}
+      />,
+    );
+  });
+  const view = render(
+    <GitHubBody
+      url={url}
+      body={before}
+      bodyHtml={privateVideo("1")}
+      refresh={refresh}
+    />,
+  );
+  const video = () => view.container.querySelector("video");
+  fireEvent.error(video() as HTMLVideoElement);
+  expect(video()).toHaveAttribute("src", signedVideo("1"));
+  // Each link loads, then fails, which leaves it unavailable until a newer
+  // link replaces it.
+  let cycles = 0;
+  for (let shown = video(); cycles < 8 && shown; shown = video()) {
+    fireEvent.loadedData(shown);
+    fireEvent.error(shown);
+    cycles += 1;
+    await settle();
+    await wait(30_000);
+  }
+  expect(cycles).toBe(5);
+  // One read at once for the source, then three retries; then none.
+  expect(refresh).toHaveBeenCalledTimes(4);
+  await wait(10 * 60_000);
+  expect(refresh).toHaveBeenCalledTimes(4);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("does not refill retries when other media loads", async () => {
+  vi.useFakeTimers();
+  const working = `https://private-user-images.githubusercontent.com/1888043/2-dd1f7e4f-e2a4-4aec-b661-cb45032f29c5.png?jwt=1`;
+  const refresh = vi.fn(() => Promise.reject(new Error("Not Found")));
+  render(
+    <GitHubBody
+      url={url}
+      body={`${privateBody}\n\n![Working](${after})`}
+      bodyHtml={`${privateImage("1")}<img src="${working}" alt="Working">`}
+      refresh={refresh}
+    />,
+  );
+  failTwice();
+  await settle();
+  await wait(30_000);
+  expect(refresh).toHaveBeenCalledTimes(2);
+  // Another image loads its signed link, then loads again (as a fullscreen
+  // viewer's copy would), between retries.
+  fireEvent.error(screen.getByAltText("Working"));
+  expect(screen.getByAltText("Working")).toHaveAttribute("src", working);
+  for (let load = 0; load < 3; load++) {
+    fireEvent.load(screen.getByAltText("Working"));
+    await wait(30_000);
+  }
+  await wait(10 * 60_000);
+  expect(refresh).toHaveBeenCalledTimes(4);
+  expect(vi.getTimerCount()).toBe(0);
 });
 
 it("cancels a pending retry on unmount, and schedules none after it", async () => {
